@@ -1,0 +1,19 @@
+{
+  "CLASS_01": [
+    "H90",
+    "H 90"
+  ],
+  "CLASS_02": [
+    "SPT10",
+    "SPT 10"
+  ],
+  "_normalize_rules": {
+    "upper": true,
+    "strip_spaces": true,
+    "common_confusions": {
+      "O": "0",
+      "I": "1",
+      "S": "5"
+    }
+  }
+}
