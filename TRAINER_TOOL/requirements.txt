@@ -1,5 +1,0 @@
-numpy>=1.26
-opencv-python>=4.9
-tqdm>=4.66
-onnxruntime>=1.19
-# Optional: paddleocr torch torchvision timm faiss-cpu

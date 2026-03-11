@@ -1,0 +1,27 @@
+# 1) Train on Kaggle T4 x2
+torchrun --nproc_per_node=2 -m src.train_encoder ^
+  --data "/kaggle/input/YOUR_DATASET" ^
+  --out "/kaggle/working/outputs/run1" ^
+  --epochs 50 ^
+  --img 320 ^
+  --batch 16 ^
+  --workers 2 ^
+  --amp
+
+# 2) Export ONNX runtime bundle
+python -m src.export_onnx ^
+  --ckpt "/kaggle/working/outputs/run1/best.pt" ^
+  --out-dir "/kaggle/working/EXPORT/runtime_bundle"
+
+# 3) Build class prototypes
+python -m src.build_prototypes ^
+  --data "/kaggle/input/YOUR_DATASET" ^
+  --ckpt "/kaggle/working/outputs/run1/best.pt" ^
+  --out "/kaggle/working/EXPORT/runtime_bundle/prototypes.npz"
+
+# 4) Build gallery refs
+python -m src.build_gallery_refs ^
+  --data "/kaggle/input/YOUR_DATASET" ^
+  --out "/kaggle/working/EXPORT/runtime_bundle/gallery_refs.npz" ^
+  --per-class 8 ^
+  --img 320
