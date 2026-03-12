@@ -12,7 +12,7 @@ class PillEncoder(nn.Module):
         num_classes: int,
         backbone: str = "convnext_tiny",
         emb_dim: int = 256,
-        dropout: float = 0.1,
+        dropout: float = 0.0,
         pretrained: bool = True,
     ):
         super().__init__()
@@ -36,7 +36,7 @@ class PillEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor):
         feat = self.backbone(x)
-        emb = self.emb_head(feat)
-        emb = F.normalize(emb, dim=1)
-        logits = self.cls_head(emb)
+        emb_raw = self.emb_head(feat)
+        emb = F.normalize(emb_raw, dim=1)
+        logits = self.cls_head(emb_raw)
         return logits, emb
