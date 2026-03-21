@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+pydantic
+numpy
+opencv-python
+requests
+torch
