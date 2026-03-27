@@ -1,0 +1,10 @@
+fastapi>=0.111
+uvicorn>=0.30
+numpy>=1.26
+opencv-python-headless>=4.10
+pydantic>=2.7
+requests>=2.32
+torch>=2.3
+joblib>=1.4
+pyyaml>=6.0
+scikit-learn>=1.5

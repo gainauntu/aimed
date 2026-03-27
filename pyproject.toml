@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pill-system-prod"
+version = "0.1.0"
+description = "Production-grade pharmacy dispensing inference service"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "numpy>=1.26.0",
+  "opencv-python>=4.10.0",
+  "pydantic>=2.8.0",
+  "PyYAML>=6.0.1",
+  "torch>=2.3.0",
+  "scikit-image>=0.24.0",
+  "scikit-learn>=1.5.0",
+  "joblib>=1.4.0",
+  "python-multipart>=0.0.9"
+]
+
+[project.optional-dependencies]
+faiss = ["faiss-cpu>=1.8.0"]
+dev = ["pytest>=8.3.0", "httpx>=0.27.0", "ruff>=0.5.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*", "runtime_service*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-q"

@@ -1,0 +1,23 @@
+thresholds: {}
+paths:
+  background_reference: 
+  class_profiles: artifacts/class_profiles.json
+  prototype_library: artifacts/prototype_library.json
+  prototype_model_checkpoint: artifacts/prototype_model.pt
+  calibrator: artifacts/calibrator.joblib
+  ood_index: artifacts/ood_index
+  ood_backbone_checkpoint: artifacts/ood_backbone.pt
+  audit_log: logs/runtime_audit.jsonl
+  tower_a_checkpoint: artifacts/tower_a.pt
+  tower_b_checkpoint: artifacts/tower_b.pt
+  tower_c_checkpoint: artifacts/tower_c.pt
+runtime:
+  target_size: 288
+  expected_width: 352
+  expected_height: 288
+  use_gpu: true
+  api_title: Pill Runtime API
+class_labels:
+- demo_pill
+class_specific_variance_thresholds:
+  demo_pill: 1.0

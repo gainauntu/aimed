@@ -1,0 +1,37 @@
+thresholds:
+  min_blur_variance: 120.0
+  min_frame_mean: 5.0
+  max_frame_mean: 250.0
+  max_stuck_column_ratio: 0.05
+  background_diff_threshold: 15
+  min_component_area: 2000
+  max_component_area: 55000
+  max_small_debris_area: 500
+  min_large_component_area: 1500
+  min_solidity: 0.75
+  max_perimeter_ratio: 1.15
+  max_coating_defect_ratio: 0.03
+  max_area_ratio: 1.30
+  max_color_distance: 60.0
+  min_ssim: 0.18
+  accept_probability: 0.995
+paths:
+  background_reference: 
+  class_profiles: artifacts/class_profiles.json
+  prototype_library: artifacts/prototype_library.json
+  calibrator: artifacts/calibrator.joblib
+  ood_index: artifacts/ood_index
+  audit_log: logs/audit.jsonl
+  tower_a_checkpoint: artifacts/tower_a.pt
+  tower_b_checkpoint: artifacts/tower_b.pt
+  tower_c_checkpoint: artifacts/tower_c.pt
+runtime:
+  target_size: 288
+  expected_width: 352
+  expected_height: 288
+  use_gpu: false
+  api_title: Pill Dispensing Service (Mock)
+class_labels:
+  - demo_pill
+class_specific_variance_thresholds:
+  demo_pill: 1.0

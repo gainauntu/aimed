@@ -1,0 +1,52 @@
+{
+  "files": {
+    "calibrator.joblib": {
+      "bytes": 904,
+      "sha256": "588bbd558f497f752fff3d78121eea1d4340e2fffd7f21041b0ec442a248d0ca"
+    },
+    "class_profiles.json": {
+      "bytes": 313,
+      "sha256": "7670ef601f5b127fa66080423f120b971a432565e0382544056822b85812876b"
+    },
+    "labels.json": {
+      "bytes": 17,
+      "sha256": "c79881e9445a133b665bc67d4aca74dda590fae01477c4ef1f713d773eddeb29"
+    },
+    "ood_backbone.pt": {
+      "bytes": 2996,
+      "sha256": "c209122a2bff3ecd0b8702aac2b5e27ed7931ad5d0cca691693edb475d74ef8a"
+    },
+    "ood_index.json": {
+      "bytes": 22,
+      "sha256": "e23f707b688e6e75196b228517a5c5b2b6ab1fef3b083e587093179f4df150d8"
+    },
+    "ood_index.npy": {
+      "bytes": 1152,
+      "sha256": "c32a2b5fbd0df55a29ca293e8e8dd4dc636185fc8d8d18f2426cfe091ca83841"
+    },
+    "prototype_library.json": {
+      "bytes": 2982,
+      "sha256": "97a696cd47852172946a04429f2b6d1d7d77fac7e5d361b5dd5e351744bdaaad"
+    },
+    "prototype_model.pt": {
+      "bytes": 3836,
+      "sha256": "38e8c8d755e1d5906d2582c33e2692ccc7f9c92ea1fc1126cf7735d1f98f25cc"
+    },
+    "tower_a.pt": {
+      "bytes": 3528,
+      "sha256": "61f6f1c5db3c5668539bac2219efa88608ec22dce32c91a3acfe85a65df22cd6"
+    },
+    "tower_b.pt": {
+      "bytes": 3628,
+      "sha256": "cc0651086694bc6c7d75cceba277e19e0538459832dea0af2774a4aef7807c9c"
+    },
+    "tower_c.pt": {
+      "bytes": 3628,
+      "sha256": "d8248b4b242b3138cb6868c1c9731bac266ace696f80c9b0f9bf985b2f8c148a"
+    },
+    "variance_thresholds.json": {
+      "bytes": 22,
+      "sha256": "7e4610fb8832502ee78875d33fa06c4a1ed0ccf324d1bd0cb00e8f47a221e8cd"
+    }
+  }
+}

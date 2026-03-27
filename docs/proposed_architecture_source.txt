@@ -1,0 +1,919 @@
+This is the final build. Everything synthesized, every constraint respected, every previous conversation resolved into one production-grade document. Let me construct it completely.
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 0.25s;
+    animation-timing-function: cubic-bezier(0.19, 1, 0.22, 1);
+  }
+VvisualizeVvisualize show_widget
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 0.25s;
+    animation-timing-function: cubic-bezier(0.19, 1, 0.22, 1);
+  }
+VvisualizeVvisualize show_widget
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 0.25s;
+    animation-timing-function: cubic-bezier(0.19, 1, 0.22, 1);
+  }
+VvisualizeVvisualize show_widget
+Production-Grade Pharmacy Dispensing System
+Complete Specification — Final Version
+
+Locked Constraints
+Camera:       352×288 · fixed mount · fixed controlled identical lighting
+              train and test captured in same physical environment
+Placement:    Pill anywhere in frame · any rotation · guaranteed in-focus
+Input:        Two images per pill · A-side and B-side · order completely unknown
+Dataset:      Maximum 20 pairs per class at launch · closed set · class name only
+Time budget:  4–5 seconds per classification decision
+Goal:         If a human eye would struggle → UNDECIDED · if confident → never wrong
+
+The Central Design Principle
+Every architectural decision traces back to one rule:
+
+The system may only commit to a classification when every independent layer of evidence unanimously agrees. Disagreement at any level is not resolved by voting — it is treated as uncertainty and the pill goes to the failed container. The UNDECIDED container is not a failure. A misclassified pill reaching the wrong container is the only failure.
+
+
+Time Budget Breakdown
+Stage 0   — Raw frame triage:              ~50ms
+Stage 1   — Full preprocessing:           ~300ms
+Stage 1.9 — Cross-image pre-check:         ~50ms
+TTA gen   — 32 view pairs:                ~100ms
+Stage 2   — 3 towers × 32 views (GPU):   ~2,500ms  ← dominant cost
+Stage 3   — OOD k-NN (FAISS):            ~150ms
+Stage 4   — Prototypical verifier:        ~200ms
+Stage 5   — Constraint gate:               ~50ms
+Stage 6   — Calibrated decision:           ~50ms
+Logging   — Async write:                   ~50ms
+─────────────────────────────────────────────────
+Total:                                 ~3,500ms  ← within 4–5s budget
+The towers run in parallel on GPU — all three process all 32 TTA views simultaneously. That 2.5 seconds is wall-clock time, not sequential compute time.
+
+Training — The Complete Sequence
+Phase T1 — DINO self-supervised domain adaptation
+Run before any supervised training begins. Requires no labels. Uses the images you already have.
+Method:    DINO (self-distillation with no labels)
+Input:     All available pill images — both A and B sides of every class
+           No labels used at this stage
+           
+What happens:
+  Two randomly augmented views of the same image are passed through
+  a student network and a teacher network simultaneously.
+  The student learns to predict the teacher's output without labels.
+  The teacher is an exponential moving average of the student weights.
+  
+What is learned:
+  The backbone learns what makes two pill images similar —
+  coating texture, imprint edge sharpness, score line geometry,
+  capsule join seams, glossy vs matte surface properties.
+  All of this from the images themselves, with zero annotation cost.
+  
+Why it matters for 20 pairs:
+  ImageNet weights know about cars, animals, furniture.
+  After DINO on your pills the backbone understands pill-specific
+  visual features — coating texture, imprint geometry, edge sharpness.
+  This is free improvement that costs only compute time.
+
+Output: DINO-adapted backbone weights saved as the starting point
+        for all three towers and for the Prototypical Network.
+Phase T2 — Metric head training (backbone fully frozen)
+What trains:   Only the projection head — 2 linear layers + batch norm
+               Zero gradient flows into the backbone
+               
+Data:          20 pairs × 2 images = 40 raw images per class
+               × 100 augmentations = 4,000 effective samples per class
+
+Validation:    Leave-one-pair-out cross-validation (LOOCV)
+               For each class, train on 19 pairs, validate on 1, repeat 20 times
+               Average performance across all 20 folds
+               This is the only safe validation strategy with 20 pairs
+
+Convergence:   Train until validation metric stabilizes
+               Early stopping with patience=10 epochs
+
+Why freeze first:
+  40 images cannot safely update a large backbone.
+  The head is small — it converges safely on 4,000 augmented samples.
+  Backbone remains exactly as DINO adapted it.
+Phase T3 — Gradual backbone unfreeze
+After Phase T2 converges, unfreeze the backbone in two steps:
+
+Step 3a — Unfreeze top 10% of backbone layers:
+  These are the highest-level semantic layers
+  LR: unfrozen layers 1e-4 · head 1e-3
+  Run 20 epochs · continue LOOCV monitoring
+
+Step 3b — Unfreeze top 10–30% of backbone layers:
+  Now top 30% total is learning
+  LR: top 10% at 1e-4 · next 20% at 1e-5 · head 1e-3
+  Run 20 more epochs
+
+Always frozen:
+  Bottom 70% of backbone — general visual features
+  Edges, colors, textures — correct as-is from ImageNet + DINO
+  Touching them with 40 images would corrupt them
+Phase T4 — Prototypical Network episodic training
+Architecture:  DenseNet-169 starting from DINO-adapted weights
+               Different from all three towers — dense connectivity,
+               different feature reuse pattern
+               
+Loss:          Prototypical loss only — no cross-entropy class labels
+               The network learns: "are these two pills from the same class?"
+               
+Episodes:      50,000 total
+               Each episode: randomly sample 5 classes
+                             5 support images per class → prototype
+                             5 query images per class → classify by distance
+               
+Swap-awareness:
+               Every episode includes both orderings:
+               (img_X, img_Y) and (img_Y, img_X) as equivalent positives
+               The network learns from episode 1 that order is irrelevant
+               
+Hard episodes: Every 1,000 episodes, choose the 5 most visually similar
+               classes in the dataset for that episode
+               Forces discrimination of near-identical pills
+               
+After training:
+               Run all 40 training images through DenseNet-169
+               Apply symmetric fusion to each A/B training pair
+               Per class: store centroid · p95 dist · p99 dist · 2nd-class margin
+Augmentation policy — training
+Applied to every training image (same pipeline for all towers):
+
+Geometric — full range, most important:
+  Rotation:         uniform 0°–360°     pill at any orientation
+  ±180° flip:       50% probability     major axis ambiguity
+  A/B swap:         50% probability     order irrelevance
+  Elastic warp:     α=30 σ=5 (mild)     physical deformation sim
+
+Photometric — conservative, controlled env:
+  Gaussian blur:    σ = 0–0.5           micro-focus variation
+  Gaussian noise:   σ = 0–2 pixel vals  sensor noise
+  HSV hue jitter:   ±3°                 lot-to-lot color drift
+  HSV sat jitter:   ±5%                 lot variation
+  HSV val jitter:   ±3%                 minor exposure drift
+
+Mixing — same class only:
+  CutMix:  blend two same-class images  partial information robustness
+  Mixup:   α=0.2 same-class only        interpolation robustness
+  
+Prohibited:
+  Heavy color distortion  (pills have known stable colors)
+  Cutout / random erasing (pill should be complete in frame)
+  Cross-class mixing      (never blend images of different pills)
+  Large zoom/translation  (preprocessing handles centering)
+
+Stage 0 — Raw Frame Triage
+Both images checked independently. Either fails → full request rejected before any processing.
+Blur check:
+  Compute Laplacian variance of full 352×288 frame
+  Threshold ≥ 120  (tight — at this resolution blur destroys fine features)
+  Score line at 7px: a blurry image renders it as a smooth gradient, not a groove
+  Below threshold → REJECT
+
+Pill signal present:
+  Apply background subtraction using stored reference
+  Check if any foreground region of plausible pill size exists
+  Nothing found → REJECT
+
+Camera artifact check:
+  Frame mean < 5 → solid black → camera failure → REJECT
+  Frame mean > 250 → solid white → overexposed → REJECT
+  Stuck pixel columns > 5% of frame → hardware fault → REJECT
+
+Resolution sanity:
+  Both dimensions must be 352×288 ± 2px
+  Catches corrupted frames from camera buffer overflow
+
+Stage 1 — Preprocessing Pipeline
+Both images processed identically and completely independently.
+Step 1.1 — Background subtraction
+Machine setup (one-time installation):
+  Capture 30 reference frames with no pill present
+  Compute pixel-wise median of all 30 → stored_reference_background
+  
+  Recapture this reference:
+    After any lighting hardware change
+    Weekly as part of maintenance schedule
+    After any camera position adjustment
+    If Stage 0 artifact rate rises (may indicate background drift)
+
+Per image at runtime:
+  diff = abs(current_frame − stored_reference_background)
+  binary_mask = threshold(diff, value=15)
+  binary_mask = morphological_close(binary_mask, kernel=7×7)
+  binary_mask = morphological_open(binary_mask, kernel=3×3)
+Step 1.2 — Anomaly pre-check
+Find all connected components in binary_mask.
+
+Component count:
+  0 found:
+    No pill on tray → REJECT
+    
+  2+ found, both large (area > 1,500px each):
+    Two pills on tray, or foreign object alongside pill → REJECT
+    
+  2+ found, one tiny (area < 500px):
+    Small dust/debris alongside pill → ignore tiny component, continue
+    
+  1 found: continue
+
+Size plausibility:
+  Smallest acceptable pill area: 2,000 px
+    (smallest real pill at 352×288 with pill at ≥50% of frame)
+  Largest acceptable pill area:  55,000 px
+    (largest capsule at 352×288 at 75% of frame)
+  Outside this range → REJECT
+
+Convexity (solidity):
+  solidity = component_area / convex_hull_area
+  Normal pills: 0.82 – 1.00  (compact, rounded shapes)
+  Chipped/damaged/foreign: < 0.75  (irregular)
+  Below 0.75 → REJECT
+  
+  Why solidity is powerful:
+    A pill fragment, piece of plastic packaging, or tablet broken in two
+    all have low solidity regardless of their pixel area.
+    A complete undamaged pill is always compact and convex.
+Step 1.3 — Localization
+Pill is anywhere in the 352×288 frame. This step solves that.
+
+1. Take the single accepted connected component
+2. Compute its tight axis-aligned bounding box
+3. Compute margin: max(bbox_w, bbox_h) × 0.10 (10% of larger dimension)
+4. Expand bounding box by margin on all four sides
+5. Clip expansion to frame boundaries (pill near edge: margin reduces gracefully)
+6. Extract crop from the ORIGINAL camera image — not from the binary mask
+   (we want full color, full dynamic range — the mask was only for localization)
+
+From this point forward, position in the original frame is irrelevant.
+All downstream processing operates on the crop.
+Step 1.4 — Physical statistics extraction
+Computed from the foreground mask pixels within the crop.
+Stored in the physical stats vector. Passed to Stage 5 later.
+
+Dominant HSV color:
+  hue_mean, hue_std        (foreground pixels only, circular mean for hue)
+  sat_mean, sat_std        (saturation)
+  val_mean, val_std        (brightness value)
+
+Geometry:
+  pixel_area_proxy         (count of foreground pixels)
+  aspect_ratio             (bounding box long_side / short_side)
+  convexity_ratio          (component_area / convex_hull_area)
+  
+Surface:
+  edge_density             (Canny edge magnitude sum / pixel_area_proxy)
+  
+These 9 numbers per image define what the pill looks like without any ML.
+They are extracted once here and reused in Stage 5.
+Step 1.5 — Shape classification
+Based on aspect_ratio from Step 1.4:
+
+  aspect_ratio < 1.15 → shape_class = ROUND
+    Rotation canonicalization will be skipped (Step 1.7)
+    
+  1.15 ≤ aspect_ratio < 1.80 → shape_class = OVAL
+  
+  1.80 ≤ aspect_ratio < 2.50 → shape_class = OBLONG
+  
+  aspect_ratio ≥ 2.50 → shape_class = CAPSULE
+
+Stored in physical stats vector.
+Used in Stage 1.9 cross-image check and Stage 5 constraint gate.
+Step 1.6 — Damage detection
+A damaged pill is a safety hazard independent of what drug it is.
+Rejected unconditionally regardless of classification outcome.
+
+Contour irregularity:
+  Extract outer contour of the pill mask (cv2.findContours)
+  Compute: perimeter_ratio = actual_perimeter / convex_hull_perimeter
+  
+  Undamaged pills: 1.00 – 1.06 (smooth, compact outline)
+  Chipped pill:    > 1.15  (notches create extra perimeter)
+  If perimeter_ratio > 1.15 → REJECT
+
+Surface crack scan:
+  Apply Laplacian (high-pass) to the pill ROI crop
+  Morphologically thin the response using skeletonization
+  Measure total length of linear features inside pill mask
+  Subtract expected contribution from standard imprint patterns
+  (imprints produce high-pass response — distinguish from cracks by orientation)
+  If residual crack line length > threshold → REJECT
+
+Coating integrity check:
+  For each foreground pixel, compute HSV value (brightness channel)
+  Find pixels where value deviates > 3σ from dominant value
+  These are coating chips, delamination, or exposed tablet core
+  If defect area > 3% of total pill area → REJECT
+Step 1.7 — Rotation canonicalization
+For ROUND pills (shape_class == ROUND):
+  Skip entirely — rotation is irrelevant for circular pills
+  All 360° orientations of a round pill are handled by TTA augmentation
+
+For all other shape classes:
+  1. Collect (x, y) pixel coordinates of all foreground pixels in the mask
+  2. Run PCA on these coordinates
+  3. First principal component = major axis of the pill shape
+  4. Compute angle θ between major axis and horizontal axis
+  5. Rotate the crop by −θ to align major axis horizontally
+  
+  Result: A capsule that was at 73° in the frame is now horizontal.
+          An oval tablet at 140° is now aligned left-to-right.
+  
+The 180° ambiguity:
+  PCA finds the axis direction but cannot determine which end is "left".
+  A pill at 0° and the same pill at 180° are indistinguishable to PCA.
+  This is intentional — do not try to resolve it here.
+  Resolution requires pill-specific prior knowledge not available at this stage.
+  The TTA engine covers both orientations in its 8-rotation sweep.
+  All towers are trained with ±180° flip augmentation for this reason.
+Step 1.8 — Resize to 288×288
+Target: 288×288 pixels
+
+Why 288 and not 448:
+  After crop, pill ROI is approximately 175–230px across longest dimension.
+  
+  448px target requires: 448/200 ≈ 2.24× upscale → invents pixels that do not exist
+  288px target requires: 288/200 ≈ 1.44× upscale → minimal interpolation artifact
+  
+  Worst case (175px pill, 288px target): 288/175 = 1.65× — acceptable
+  Best case (230px pill, 288px target): 288/230 = 1.25× — excellent
+
+Process:
+  1. Compute scale factor to fit ROI within 288×288, preserving aspect ratio
+  2. Resize using Lanczos resampling (highest quality for small upscaling)
+  3. Create 288×288 canvas filled with stored background mean color
+     (not black — actual background color of your controlled rig)
+  4. Place scaled pill ROI centered in the canvas
+  
+Output: 288×288 image · pill centered · orientation normalized · real pixels
+
+Stage 1.9 — Cross-Image Pre-Check
+The earliest possible point to verify the two images are from the same pill.
+Shape class consistency:
+  image_A.shape_class must equal image_B.shape_class
+  ROUND + CAPSULE → two different physical objects → REJECT
+  OVAL + OBLONG → arguably same class, allow (2-step size change)
+  ROUND + ROUND → allow, continue
+  Any clear mismatch → REJECT
+
+Color distance:
+  Compute HSV Euclidean distance between dominant colors of A and B
+  Use a global loose threshold at this point (per-class tightening in Stage 5)
+  HSV distance > 60 (on 0–255 scale) → dramatically different colors → REJECT
+
+Size proxy ratio:
+  Both images captured at same distance, same fixed camera height
+  If one pill appears significantly larger in pixel area:
+    ratio = max(area_A, area_B) / min(area_A, area_B)
+    ratio > 1.30 → different sized objects → REJECT
+
+SSIM floor:
+  Compute SSIM between the two 288×288 ROI crops
+  Pills have two sides that can look quite different (imprint on one side)
+  But they share the same overall shape and approximate color
+  SSIM < 0.18 → images look nothing like each other → REJECT
+  (This is a loose floor — tight per-class checks are in Stage 5)
+
+TTA Engine — 32 View Pairs
+Generated at inference time on the two clean 288×288 ROI crops.
+32 views constructed as follows:
+
+8 rotation base views:
+  0°, 45°, 90°, 135°, 180°, 225°, 270°, 315°
+  Covers full rotation space at 45° intervals
+  Canonicalization reduced residual rotation, but PCA estimation noise remains
+  These 8 views ensure no residual orientation is missed
+
+4 photometric variants on each rotation:
+  Variant 1: clean rotation — no modification
+  Variant 2: + Gaussian blur σ=0.3 (micro-focus variation)
+  Variant 3: + Gaussian noise σ=1.5 (sensor noise simulation)
+  Variant 4: + HSV jitter (hue ±2°, sat ±3%, val ±2%)
+
+Total: 8 × 4 = 32 view pairs per pill
+
+For each view i:
+  Apply identical transform to image A and image B
+  Compute symmetric fusion: fused_i = [norm_A + norm_B, |norm_A − norm_B|, norm_A ⊙ norm_B]
+  This fused vector is what enters each tower
+  Identical output whether original images were (A,B) or (B,A)
+  
+  Mathematical proof of swap-invariance:
+    fuse(A, B) = [A+B, |A−B|, A*B]
+    fuse(B, A) = [B+A, |B−A|, B*A] = [A+B, |A−B|, A*B]  ← identical
+
+Why these specific 32 views and not 64:
+  With 20 pairs of training data, even the TTA variance signal can be noisy
+  if the towers haven't seen enough examples to be confidently stable.
+  32 views covers rotation space adequately and provides a reliable variance
+  signal without requiring the full 64-view coverage needed at larger data.
+  Scale to 64 views when dataset reaches 50+ pairs per class.
+
+Stage 2 — Three Independent Classification Towers
+Why exactly three for Phase 1
+Five towers would provide lower correlated failure probability but introduces a practical risk: with 20 pairs per class, poorly-calibrated towers increase unnecessary rejection rates at deployment. Three towers from three different architectural families — one CNN-with-tile, one pure global CNN, one transformer — provide genuinely uncorrelated failure modes. The third tower is already a different family from both others. Adding a fourth and fifth contributes diminishing safety returns at this data volume and increases the risk of spurious disagreements.
+Start with three. Add Tower D (Swin-L) at 50 pairs. Add Tower E (ResNeXt multi-scale) at 100 pairs.
+Tower A — ConvNeXt-Base with global and tile branches
+Backbone:       ConvNeXt-Base (not Large — appropriate for 20 pairs)
+Pre-training:   DINO-adapted weights from Phase T1
+Input:          288×288 ROI crops
+
+Global branch:
+  Full 288×288 image through ConvNeXt-Base backbone
+  Captures: overall shape, color, coarse imprint layout, surface texture
+
+Tile branch:
+  288×288 divided into 5×5 grid = 25 tiles of 57×57 pixels each
+  WHY 5×5 not 7×7:
+    7×7 at 288px → 41px per tile → borderline for imprint character
+    5×5 at 288px → 57px per tile → comfortable resolution per tile
+    A typical imprint letter is 14–28px tall → fits well within one 57px tile
+  Each tile: shared lightweight CNN encoder → feature vector
+  Tile features → learned attention pooling → suppress background/padding tiles
+  Attention learns which tile positions contain imprint vs empty pill surface
+
+Fusion:
+  [global_features, attention_pooled_tile_features] → cross-gate fusion head
+  Cross-gate: gated linear unit that learns which branch to trust per sample
+
+Output:
+  Classifier head: fused → 512-dim → N-class logits
+  Embedding head:  fused → 256-dim L2-normalized vector
+
+Loss:    ArcFace (scale s=64, margin m=0.5) + cross-entropy
+         ArcFace enforces angular margin between class clusters in embedding sphere
+         Geometrically separates visually similar classes
+
+Seed:    A
+Partial fine-tune: Top 30% of ConvNeXt-Base backbone (Phase T3)
+Tower B — EfficientNet-B5, global only
+Backbone:       EfficientNet-B5 (not B7 — safer for 20 pairs)
+Pre-training:   DINO-adapted weights
+Input:          288×288 ROI crop
+Architecture:   Single global branch — no tiling
+                Deliberately different from Tower A
+                EfficientNet's compound scaling law balances width/depth/resolution
+                differently from ConvNeXt's pure depth scaling
+
+Output:
+  Classifier head: → N-class logits
+  Embedding head:  → 256-dim L2-normalized vector
+
+Loss:    Supervised Contrastive Loss (SupCon)
+         Pulls all same-class images together in embedding space
+         No prototype anchors needed — emergent clustering
+         Fundamentally different optimization landscape from ArcFace in Tower A
+
+Seed:    B — different from all other towers
+Partial fine-tune: Top 30% of EfficientNet-B5
+Tower C — DINOv2 ViT-B/8
+Architecture:   Vision Transformer — zero convolutions
+Pre-training:   DINOv2 (self-supervised, designed for fine-grained similarity)
+                DINOv2's attention heads learn to attend to object parts
+                spontaneously — ideal for pill imprints and features
+                Further DINO-adapted on your pill images in Phase T1
+
+Input:          288×288 → divided into 8×8 pixel patches
+                288 ÷ 8 = 36 patches per side → 36×36 = 1,296 patches
+
+WHY PATCH SIZE 8 NOT 16:
+  At 288px with patch_size=16: each patch = 16×16px
+  A 7px score line spans only 44% of one patch → frequently lost
+  At 288px with patch_size=8:  each patch = 8×8px
+  A 7px score line spans 87% of one patch → reliably captured
+  Imprint stroke width 4–7px: patch size 8 captures it, 16 loses it
+  This is the most important resolution-specific architectural decision.
+
+Processing:
+  Global self-attention from patch 1
+  Every patch attends to every other patch simultaneously
+  No local-to-global hierarchy — completely different from CNN towers
+
+Output:
+  CLS token → classifier head → N-class logits
+  CLS token → embedding head → 512-dim L2-normalized vector
+
+Loss:    ProxyNCA
+         Learned class proxy vectors as anchors in embedding space
+         Embeddings pushed close to own class proxy, far from all others
+         Third different loss function — distinct failure mode from A and B
+
+Seed:    C
+Fine-tune: Last 4 transformer blocks unfrozen
+Per-tower TTA aggregation
+python# For each tower T, given 32 fused view vectors:
+logit_vectors  = []   # 32 vectors, each of shape (N_classes,)
+embed_vectors  = []   # 32 vectors, each of shape (embed_dim,)
+
+for i in range(32):   # all 32 TTA views
+    logits_i, embed_i = tower_T.forward(fused_view_i)
+    logit_vectors.append(softmax(logits_i))
+    embed_vectors.append(F.normalize(embed_i, dim=-1))
+
+# Tower summary statistics:
+mean_prediction  = mean(logit_vectors)       # averaged class probabilities
+tta_variance     = std([v[top1_class] for v in logit_vectors])
+                   # std of the top-1 class probability across 32 views
+                   # LOW   = model is certain from every angle → trustworthy
+                   # HIGH  = model changes its mind across views → uncertain
+mean_embedding   = mean(embed_vectors)       # averaged embedding
+top1_class       = argmax(mean_prediction)
+top1_confidence  = mean_prediction[top1_class]
+top1_top2_margin = mean_prediction[top1_class] - mean_prediction[second_highest]
+```
+
+### Double agreement gate
+```
+Input: top1_class and tta_variance from each of the 3 towers
+
+Check 1 — Cross-tower agreement:
+  tower_A.top1_class == tower_B.top1_class == tower_C.top1_class?
+  All three must predict identical class.
+  If any single tower predicts differently → UNDECIDED.
+  No exceptions. No confidence weighting. No override.
+  Log: which tower disagreed and what it predicted.
+  This is the most valuable diagnostic information produced by the system.
+
+Check 2 — Per-tower TTA stability:
+  For each tower T: tta_variance_T < class_specific_variance_threshold[predicted_class]
+  
+  Class-specific thresholds:
+    Set during LOOCV validation per class.
+    Distinctive pills (unique color+shape): tight threshold
+    Common-looking pills (white round): slightly looser threshold
+    Using per-class thresholds prevents over-rejecting distinctive pills
+    and under-protecting ambiguous ones.
+  
+  If any single tower shows variance above its threshold → UNDECIDED.
+  
+  What TTA variance catches that nothing else can:
+    A model that is confidently wrong on the nominal image
+    will almost always be inconsistent across 32 augmented views.
+    The wrong prediction is often orientation-sensitive or artifact-sensitive.
+    Correct classifications are stable. Wrong ones are not.
+    This is the most powerful false-confidence detector available.
+
+Both checks must pass. Either fails → UNDECIDED immediately.
+```
+
+---
+
+## Stage 3 — Feature-Space OOD Detection
+
+No training required. Uses DINO-adapted backbone features.
+```
+WHAT THIS STAGE CATCHES:
+  - Unknown pills not in the training dataset
+  - Foreign objects (plastic fragments, paper, mechanical debris)
+  - Pills from the wrong pharmacy batch that look genuinely unfamiliar
+  - Any visual pattern the backbone has never encountered
+  
+  These scenarios all pass Stage 1 preprocessing if the object happens
+  to be pill-shaped. This stage is the catch for "pill-shaped but not
+  a known pill."
+
+FAISS INDEX SETUP (one-time after training):
+  1. Extract DINO backbone feature vector for each of the 40 training
+     images per class (pre-fusion, per-image features)
+  2. Store all feature vectors in a FAISS flat index
+     (flat index — exact search, no approximation — at 40×N_classes
+      samples this is fast and exact is worth it)
+  3. For each training sample, find its 5 nearest neighbors in the index
+  4. Compute mean cosine distance to those 5 neighbors
+  5. p99_ood_threshold = 99th percentile of all training self-distances
+
+AT INFERENCE:
+  1. Extract DINO backbone feature for incoming pill image A
+  2. Extract DINO backbone feature for incoming pill image B
+  3. Query FAISS for k=5 nearest training neighbors for each image
+  4. Compute mean cosine distance for each image
+
+  If mean_distance_A > p99_ood_threshold → REJECT
+  If mean_distance_B > p99_ood_threshold → REJECT
+  Both images must independently be within the training distribution.
+```
+
+---
+
+## Stage 4 — Prototypical Network Verifier
+
+Answers a fundamentally different question from the towers.
+```
+TOWERS ASK:    "Which class does this pill belong to?"
+THIS STAGE ASKS: "Does this pill actually look like a confirmed member
+                  of the class the towers agreed on?"
+
+These are different questions. A confidently wrong tower prediction
+fails here because the prototype geometry doesn't match — the Prototypical
+Network was trained on completely different objectives with completely
+different architecture and has no reason to share the tower's failure mode.
+
+ARCHITECTURE:
+  DenseNet-169 — dense connections between all layers
+  Feature reuse is fundamentally different from ResNet/EfficientNet/ViT
+  Starting weights: DINO-adapted from Phase T1
+  Trained: Phase T4 episodic training (50,000 episodes)
+
+PROTOTYPE LIBRARY (computed once, after Phase T4):
+  For each class:
+    1. Run all 40 training images through DenseNet-169 encoder
+    2. Apply symmetric fusion to each A/B training pair
+    3. prototype_centroid = mean of all 20 fused embeddings
+    4. prototype_p95_distance = 95th percentile of distances to centroid
+    5. prototype_p99_distance = 99th percentile of distances to centroid
+    6. second_class_margin = distance from this centroid to the nearest
+                             other class centroid in the library
+  Store all values per class.
+
+AT INFERENCE:
+  1. Run TTA-mean fused embedding through DenseNet-169 encoder
+  2. Retrieve prototype for the class all three towers agreed on
+
+  Check A: cosine_similarity(test_embed, centroid) ≥ class_sim_threshold
+           FAIL → REJECT
+
+  Check B: distance(test_embed, centroid) ≤ p99_distance
+           FAIL → REJECT  (pill is too far from the class cluster)
+
+  Check C: distance(test_embed, nearest_other_centroid) ≥ safety_margin
+           FAIL → REJECT  (pill is ambiguously close to another class)
+           This is the most important check — it catches pills that are
+           genuinely between two classes, even if both towers agreed.
+  
+  All three checks must pass.
+
+Stage 5 — Image-Derived Constraint Gate
+Pure arithmetic. No neural network. Cannot be fooled by adversarial inputs or distribution shift.
+Building class profiles (automated, one-time)
+pythonfor each class in dataset:
+    images = all_training_images(class)   # 40 images (A and B sides together)
+    stats  = [extract_physical_stats(img) for img in images]
+
+    profile[class] = {
+        'hue_mean':       circular_mean([s.hue for s in stats]),
+        'hue_std':        circular_std([s.hue for s in stats]),
+        'sat_mean':       mean([s.sat for s in stats]),
+        'sat_std':        std([s.sat for s in stats]),
+        'val_mean':       mean([s.val for s in stats]),
+        'val_std':        std([s.val for s in stats]),
+        'aspect_mean':    mean([s.aspect_ratio for s in stats]),
+        'aspect_std':     std([s.aspect_ratio for s in stats]),
+        'area_mean':      mean([s.pixel_area for s in stats]),
+        'area_std':       std([s.pixel_area for s in stats]),
+        'edge_mean':      mean([s.edge_density for s in stats]),
+        'edge_std':       std([s.edge_density for s in stats]),
+        'convex_mean':    mean([s.convexity for s in stats]),
+        'convex_std':     std([s.convexity for s in stats]),
+        'expected_shape': mode([s.shape_class for s in stats]),
+    }
+    # Tolerance: ±3σ on all continuous features
+    # Controlled environment: stds are tight, thresholds are sharp
+```
+
+### Runtime (per image, 7 checks each = 14 total per pill pair)
+```
+For each incoming image (A and B, independently):
+  Retrieve ClassConstraintProfile for the predicted class
+
+  Check 1:  hue within [hue_mean ± 3×hue_std]?              → must pass
+  Check 2:  saturation within [sat_mean ± 3×sat_std]?        → must pass
+  Check 3:  brightness within [val_mean ± 3×val_std]?        → must pass
+  Check 4:  aspect_ratio within [aspect_mean ± 3×aspect_std]? → must pass
+  Check 5:  pixel_area within [area_mean ± 3×area_std]?      → must pass
+  Check 6:  edge_density within [edge_mean ± 3×edge_std]?    → must pass
+  Check 7:  shape_class == expected_shape_class?             → must pass
+
+Both images run all 7 checks = 14 checks total.
+Any single check fails → REJECT immediately.
+
+WHAT THIS CATCHES THAT ML CANNOT:
+  A white round pill classified as a red oval capsule will fail:
+  - hue check     (completely different color)
+  - aspect check  (round vs elongated — different ratio)
+  - shape check   (ROUND vs CAPSULE)
+  Three simultaneous arithmetic failures on a "confident" ML decision.
+  This gate always runs regardless of what the models said.
+```
+
+---
+
+## Stage 6 — Calibrated Meta-Decision Engine
+
+### The 12 signals
+```
+From towers:
+  S1:  Tower A TTA-mean top-1 softmax confidence
+  S2:  Tower B TTA-mean top-1 softmax confidence
+  S3:  Tower C TTA-mean top-1 softmax confidence
+  S4:  Mean top1-top2 probability margin across all 3 towers
+
+From TTA stability:
+  S5:  Mean TTA variance across all 3 towers
+  S6:  Variance of the three TTA variances
+       (are all towers equally stable, or is one less certain than others?)
+
+From verification:
+  S7:  Prototypical cosine similarity to predicted class prototype
+  S8:  Distance margin to second-nearest class prototype
+  S9:  OOD k-NN distance — inverted (closer = higher signal)
+
+From consistency and constraints:
+  S10: Cross-image SSIM between A and B preprocessed crops
+  S11: Constraint gate pass ratio (14/14 = 1.0 · any fail = rejection)
+  S12: Mean image quality score from Stage 0 (average of both images)
+```
+
+### Calibration procedure
+```
+Run after all training phases complete:
+
+1. Generate predictions for the entire LOOCV validation set
+   (All 20 leave-one-pair-out folds per class → comprehensive coverage)
+
+2. For every validation sample: record all 12 signals + ground truth label
+
+3. Fit isotonic regression:
+   Input:  12 signals
+   Output: P(classification is correct)
+   
+   Isotonic regression is chosen over logistic regression because:
+   - It makes no linearity assumptions about the signal relationships
+   - It is monotonic — a higher individual signal cannot decrease overall confidence
+   - It is well-suited to small calibration datasets
+
+4. Build reliability diagram:
+   Bin predictions by P(correct) in 0.05-wide bins
+   Plot actual accuracy per bin
+   Check: when model says 95%, is actual accuracy 95%?
+   Adjust if not — iterate until reliability diagram is diagonal
+
+5. Set ACCEPT threshold based on deployment phase:
+   Phase 1 (20 pairs):   P ≥ 0.995
+   Phase 2 (50 pairs):   P ≥ 0.999
+   Phase 3 (100+ pairs): P ≥ 0.9999
+   
+   Threshold tightens as more data makes calibration more reliable.
+   System becomes more confident AND more precise over time.
+```
+
+### The 7 hard gates
+```
+Gate 1: All 3 towers predicted the same class
+Gate 2: All 3 tower TTA variances below class-specific threshold
+Gate 3: OOD k-NN distance within training distribution (Stage 3 passed)
+Gate 4: Prototypical verifier all 3 checks passed (Stage 4 passed)
+Gate 5: Cross-image pre-check passed (Stage 1.9 passed)
+Gate 6: All 14 image-derived constraint checks passed (Stage 5 passed)
+Gate 7: Calibrated P(correct) ≥ phase-specific threshold
+
+ALL 7 MUST PASS → CLASSIFIED (target container)
+ANY SINGLE GATE FAILS → UNDECIDED (failed container)
+
+No overrides.
+No confidence bypass.
+No exceptions for "it was very close."
+No majority logic across gates.
+
+Log: exact gate that failed + all 12 signal values + which tower disagreed
+     This is the most valuable production data the system generates.
+
+Stage 7 — Audit, Drift Detection, Continuous Learning
+Complete decision log (every pill, every outcome)
+json{
+  "timestamp":         "2025-03-24T10:42:11.832Z",
+  "request_id":        "REQ-00041823",
+  "machine_id":        "DISP-UNIT-03",
+  "decision":          "CLASSIFIED",
+  "predicted_class":   "Metformin_500mg",
+  "rejection_gate":    null,
+  "rejection_reason":  null,
+  "calibrated_p":      0.99712,
+  "elapsed_ms":        3847,
+
+  "towers": {
+    "A": { "top1": "Metformin_500mg", "conf": 0.9981, "tta_var": 0.0018, "margin": 0.871 },
+    "B": { "top1": "Metformin_500mg", "conf": 0.9976, "tta_var": 0.0022, "margin": 0.848 },
+    "C": { "top1": "Metformin_500mg", "conf": 0.9968, "tta_var": 0.0029, "margin": 0.821 }
+  },
+
+  "prototypical_sim":      0.971,
+  "prototypical_2nd_gap":  0.218,
+  "ood_distance_A":        0.081,
+  "ood_distance_B":        0.087,
+  "constraint_passed":     "14/14",
+  "cross_image_ssim":      0.603,
+  "color_distance_AB":     0.041,
+
+  "physical_A": { "hue": 180, "sat": 0.19, "val": 0.88, "aspect": 1.74, "shape": "OVAL" },
+  "physical_B": { "hue": 183, "sat": 0.21, "val": 0.86, "aspect": 1.72, "shape": "OVAL" },
+
+  "quality_A": 0.94,
+  "quality_B": 0.91,
+  "image_path_A": "/captures/REQ-00041823_A.png",
+  "image_path_B": "/captures/REQ-00041823_B.png"
+}
+```
+
+### Six automated monitoring alerts
+```
+Alert 1 — Class rejection rate rising:
+  Trigger: rolling 7-day rejection rate for class X exceeds 2× its baseline
+  Possible cause: new production lot with color or size drift
+  Diagnostic: is tta_variance rising? → distribution drift
+               is ood_distance rising? → genuine new pill variant
+  Response: collect new lot images
+            update constraint profile and prototype library
+            no model retraining needed for drift — only profile update
+
+Alert 2 — Global TTA variance rising:
+  Trigger: system-wide mean TTA variance increases >20% over 14 days
+  Possible cause: camera position micro-shift, lighting component aging
+  Response: hardware inspection
+            recapture reference background frames
+            verify camera mount hasn't shifted
+
+Alert 3 — Tower disagreement rate rising:
+  Trigger: Tower X disagrees with the other two more than 2× its baseline rate
+  Possible cause: that tower's metric head has overfit or drifted
+  Response: inspect Tower X error patterns from audit logs
+            if confirmed: retrain Tower X only
+            Towers B and C continue classifying during investigation
+
+Alert 4 — OOD rejection rate spike:
+  Trigger: Stage 3 rejections increase suddenly (>3× baseline in one day)
+  Possible cause: unknown pills being introduced, preprocessing failure
+  Response: sample rejected images for pharmacist review
+            check if preprocessing output looks correct
+            check reference background frame for drift
+
+Alert 5 — Constraint gate failing after tower agreement:
+  Trigger: Stage 5 rejections for class X consistently after towers agreed
+  Possible cause: new production lot with color/size drift
+  Response: lightweight constraint profile update with new lot images
+            this is a 10-minute operation — no model retraining
+
+Alert 6 — Calibration P-value inflation:
+  Trigger: production accuracy on reviewed pills lower than P-value suggests
+  Possible cause: distribution has shifted since calibration
+  Response: recalibrate isotonic regression using accumulated audit logs
+            this is a statistics update only — no model changes
+
+All alerts send to:
+  Pharmacist dashboard (visual notification)
+  System administrator (email/SMS for hardware alerts)
+  Operations log (all alerts stored for trend analysis)
+```
+
+### Continuous improvement loop
+```
+Every week (or when failed container holds N pills):
+
+  Pharmacist reviews UNDECIDED container:
+    For each pill: assign correct class, or mark "genuinely unknown / foreign"
+    Record time taken to identify — pills that took >5 seconds of human
+    examination are flagged as "near-limit of human detection"
+
+  These reviewed samples feed back:
+    Correctly identified pills:
+      → New labeled training samples added to dataset
+      → Classes with most UNDECIDED get most new samples
+      → Triggers constraint profile update (immediate, no retraining)
+      → Triggers prototype library refresh (immediate, no retraining)
+      
+    Genuinely unknown pills:
+      → OOD threshold recalibration
+      → Flag for pharmacy management (unexpected pill in supply chain)
+      
+    Pills "near-limit of human detection":
+      → These go to the PERMANENT UNDECIDED policy list
+      → System will always send these to failed container by design
+      → Human eye cannot reliably distinguish them → system should not claim to either
+
+Dataset growth triggers:
+  When class reaches 50 pairs:
+    Add Tower D (Swin-L)
+    Scale TTA to 64 views
+    Tighten calibration threshold to P≥0.999
+    
+  When class reaches 100 pairs:
+    Add Tower E (ResNeXt-101 multi-scale)
+    Full 5-tower spec active
+    Tighten to P≥0.9999
+    Unlock last 30–40% of backbone for fine-tuning
+
+The Complete Production Spec Table
+DimensionSpecificationCamera352×288 · fixed mount · fixed controlled lighting · both train and test same environmentInput2 images · A-side + B-side · order unknown · pill anywhere in frame · guaranteed in-focusDataset20 pairs per class at launch · closed set · class name is only labelTime budget4–5 seconds total per pillStage 0Laplacian blur ≥120 · artifact · pill signal · both images passBackground refMedian of 30 frames · recaptured weekly · morph close 7×7LocalizationAnywhere in frame · largest component · 10% margin · crop from originalDamage checkContour irregularity ≤1.15 · crack scan · coating outlier ≤3%CanonicalizationPCA major axis → horizontal · ROUND shape skipsResize target288×288 (not 448 — avoids fake pixel upscaling)Cross-image preShape match · color distance · size ratio ≤1.30 · SSIM ≥0.18Domain adaptDINO self-supervised on all pill images before supervised trainingTrainingDINO → frozen head → partial unfreeze top 30% → prototypical episodicAugmentation360° rot · ±180° flip · A/B swap · blur · noise · HSV jitter · CutMix/Mixup same-classValidationLOOCV — leave-one-pair-out · 20 folds per classPhase 1 towers3 towers: ConvNeXt-Base (global+tile 5×5) · EfficientNet-B5 (global) · DINOv2 ViT-B/8Tower lossesArcFace · SupCon · ProxyNCATile grid5×5 (57px per tile at 288px — not 7×7)ViT patch size8px (not 16px — captures 7px score lines)Symmetric fusionsum + |A−B| + A⊙B · swap-invariant by proofTTA Phase 132 views (8 rotations × 4 photometric variants)Agreement gateAll towers same class · AND all TTA variances below class thresholdOOD detectionk-NN k=5 · FAISS flat index · p99 threshold · per imagePrototypicalDenseNet-169 · episodic training · 50k episodes · class-specific thresholdsConstraint gate14 checks per pair · ±3σ profiles · pure arithmetic · no MLSignals12 signals to calibrated engineCalibrationIsotonic regression on LOOCV data · reliability diagram verifiedPhase 1 thresholdP ≥ 0.995Phase 2 thresholdP ≥ 0.999 (at 50 pairs per class)Phase 3 thresholdP ≥ 0.9999 (at 100+ pairs per class)Hard gates7 — all must pass — no exceptionsAudit logFull decision log every pill · all 12 signals · image pathsMonitoring6 automated alerts with specific diagnostic guidanceContinuous learningUNDECIDED → pharmacist review → new training data → profile updatePhase 2 addTower D (Swin-L) at 50 pairs · 64 TTA viewsPhase 3 addTower E (ResNeXt multi-scale) at 100 pairs · full 5-tower spec
+
+The One Thing That Never Changes
+No matter which phase of deployment, no matter how confident the system is, no matter how much the dataset grows:
+
+If every signal agrees but one human pharmacist, looking at both images for five minutes with good lighting, cannot be completely certain which pill it is — the system should have already sent it to the UNDECIDED container. Not because the system failed. Because that is what the system is designed to do.
+
+The failed container is not a problem to be minimized. It is the system's most important output. A pill that goes to a human is a pill that cannot cause harm. A pill that goes to the wrong container cannot be un-dispensed.
