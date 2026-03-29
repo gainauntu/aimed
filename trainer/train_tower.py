@@ -190,7 +190,14 @@ def main():
 
     model = build_model(ns.tower, len(class_names), backbone_checkpoint=ns.backbone_init or None).to(device)
     if distributed:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+        # find_unused_parameters=True is required because during frozen_head
+        # and partial-unfreeze phases most backbone parameters have
+        # requires_grad=False and produce no gradients.  DDP's default
+        # (find_unused_parameters=False) assumes every parameter participates
+        # in every backward pass — that assumption is wrong here and causes
+        # "Expected to have finished reduction in the prior iteration" errors.
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank,
+                    find_unused_parameters=True)
     core = _unwrap(model)
     apply_phase_freeze(core, ns.tower, ns.phase)
 
@@ -243,13 +250,28 @@ def main():
         record = {'epoch': epoch + 1, 'train_loss': run_loss / max(1, len(train_loader)), **val_metrics}
         history.append(record)
         if is_main_process():
-            ckpt = {'model_state': _unwrap(model).state_dict(), 'tower': ns.tower, 'class_names': class_names, 'args': vars(ns), 'history': history}
-            torch.save(ckpt, outdir / 'last.ckpt')
             if val_metrics['acc'] > best_acc:
                 best_acc = val_metrics['acc']
-                torch.save(ckpt, outdir / 'best.ckpt')
                 (outdir / 'labels.json').write_text(json.dumps(class_names, ensure_ascii=False, indent=2), encoding='utf-8')
-                (outdir / 'metrics.json').write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding='utf-8')
+            # Always write metrics — needed by collect_fold_metrics in the launcher.
+            (outdir / 'metrics.json').write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding='utf-8')
+
+            # LOOCV folds: never save model weights.
+            # 180 folds × ~300 MB per checkpoint = ~54 GB — instantly exceeds Kaggle 20 GB limit.
+            # The fold job only needs to produce metrics.json so the launcher can
+            # choose the best training phase.  The actual model is saved only once
+            # during the final retrain (split_mode='random') which runs after all folds.
+            if ns.split_mode != 'loocv':
+                ckpt = {
+                    'model_state': _unwrap(model).state_dict(),
+                    'tower': ns.tower,
+                    'class_names': class_names,
+                    'args': vars(ns),
+                    'history': history,
+                }
+                torch.save(ckpt, outdir / 'last.ckpt')
+                if val_metrics['acc'] >= best_acc:
+                    torch.save(ckpt, outdir / 'best.ckpt')
     cleanup_distributed()
 
 

@@ -21,11 +21,34 @@ if str(_TRAINER_DIR) not in sys.path:
 
 import joblib
 import numpy as np
+import shutil
 
 
 def run(cmd: list[str]):
     print('\nRUN:', ' '.join(cmd))
     subprocess.run(cmd, check=True)
+
+
+def disk_free_gb() -> float:
+    try:
+        stat = shutil.disk_usage('/kaggle/working')
+        return stat.free / (1024 ** 3)
+    except Exception:
+        return float('inf')
+
+
+def check_disk(min_gb: float = 1.0, label: str = ''):
+    free = disk_free_gb()
+    tag = f' [{label}]' if label else ''
+    print(f'  disk free{tag}: {free:.1f} GB')
+    if free < min_gb:
+        raise RuntimeError(
+            f'Disk nearly full ({free:.2f} GB free). Cannot continue safely.')
+
+
+def clear_pip_cache():
+    """Remove pip download/wheel cache (~1-3 GB freed)."""
+    run(['pip', 'cache', 'purge'])
 
 
 def collect_fold_metrics(base: Path, tower: str, phases: list[str], n_folds: int):
@@ -77,8 +100,14 @@ def main():
     ])
     dino_ckpt = str(work / 'dino' / 'dino_adapted_backbone.ckpt')
 
+    # Free pip cache immediately after install — recovers ~1-3 GB.
+    clear_pip_cache()
+    check_disk(min_gb=2.0, label='after DINO')
+
     # ---------------------------------------------------------------
     # Phases T2+T3 — LOOCV tower training
+    # LOOCV folds save ONLY metrics.json, never model weights.
+    # This keeps disk usage at ~0 MB per fold instead of ~300 MB.
     # ---------------------------------------------------------------
     phases = [
         ('frozen_head',       20, '1e-3'),
@@ -113,6 +142,19 @@ def main():
     (work / 'loocv_summary.json').write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
 
+    # Delete LOOCV fold directories — we only needed metrics.json from each.
+    # LOOCV folds never saved model weights (train_tower.py skips torch.save
+    # in loocv mode) so these directories are very small, but clean them up
+    # anyway to keep the working directory tidy and disk usage clear.
+    for tower in ['tower_a', 'tower_b', 'tower_c']:
+        for phase, _, _ in phases:
+            for fold in range(n_folds):
+                fold_dir = work / tower / phase / f'fold_{fold}'
+                if fold_dir.exists():
+                    shutil.rmtree(fold_dir)
+    print('LOOCV fold directories cleaned up')
+    check_disk(min_gb=2.0, label='after LOOCV cleanup')
+
     final_choices = {}
     for tower in ['tower_a', 'tower_b', 'tower_c']:
         candidates: dict[str, list[float]] = {}
@@ -139,6 +181,8 @@ def main():
 
     (work / 'final_training_choices.json').write_text(
         json.dumps(final_choices, ensure_ascii=False, indent=2), encoding='utf-8')
+
+    check_disk(min_gb=2.0, label='after final tower retrain')
 
     # ---------------------------------------------------------------
     # Phase T4 — Prototypical Network episodic training
