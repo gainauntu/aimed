@@ -241,7 +241,6 @@ def main():
     ])
 
     # Sync into runtime_service/models/current for calibration signal generation
-    import shutil
     runtime_current = Path(__file__).resolve().parents[1] / 'runtime_service' / 'models' / 'current'
     runtime_current.mkdir(parents=True, exist_ok=True)
     for f in pre_export.iterdir():
