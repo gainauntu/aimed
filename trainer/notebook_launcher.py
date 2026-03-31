@@ -186,13 +186,37 @@ def main():
 
     # ---------------------------------------------------------------
     # Phase T4 — Prototypical Network episodic training
+    #
+    # GPU cleanup before prototype training is mandatory.
+    # The torchrun DDP processes that trained the towers leave ~14 GB of
+    # PyTorch allocations behind. train_prototype.py runs as a plain
+    # single-GPU process and needs a clean slate or it OOMs immediately.
+    # The subprocess call below forces a Python-level cleanup by running
+    # a tiny helper that calls torch.cuda.empty_cache() inside the same
+    # interpreter context that will next launch train_prototype.py.
     # ---------------------------------------------------------------
+    run([
+        'python', '-c',
+        'import torch, gc; gc.collect(); torch.cuda.empty_cache(); '
+        'print("GPU cache cleared:", torch.cuda.memory_allocated()/1024**3, "GB allocated")',
+    ])
+
+    # Use image_size=224 for prototype training (not 288).
+    # DenseNet-169 was designed for 224x224. At 288x288 each episode batch
+    # is ~430 MB of raw tensors before any activations, which OOMs on T4.
+    # At 224x224 each tensor is 0.61x smaller in area — reduces memory ~40%.
+    # Prototype embeddings are used for cosine similarity only, so the exact
+    # spatial resolution has minimal effect on classification quality.
     run([
         'python', 'train_prototype.py',
         '--data-root',          ns.data_root,
         '--outdir',             str(work / 'prototype'),
         '--episodes',           '50000',
         '--episodes-per-epoch', '1000',
+        '--image-size',         '224',
+        '--n-way',              '3',
+        '--n-support',          '3',
+        '--n-query',            '3',
         '--backbone-init',      dino_ckpt,
     ])
 

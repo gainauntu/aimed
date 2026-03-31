@@ -113,12 +113,23 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--data-root', required=True)
     ap.add_argument('--outdir', required=True)
-    ap.add_argument('--image-size', type=int, default=288)
+    ap.add_argument('--image-size', type=int, default=224,
+                    help='Input resolution for prototype encoder. '
+                         '224 is the safe default for T4 (288 OOMs). '
+                         'Prototype embeddings are cosine-compared so '
+                         'resolution has minimal effect on quality.')
     ap.add_argument('--episodes', type=int, default=50000)
     ap.add_argument('--episodes-per-epoch', type=int, default=1000)
     ap.add_argument('--lr', type=float, default=3e-4)
     ap.add_argument('--backbone-init', default='')
     ap.add_argument('--seed', type=int, default=1337)
+    ap.add_argument('--n-way', type=int, default=3,
+                    help='Number of classes per episode. '
+                         'Reduced from 5 to 3 to halve episode batch size.')
+    ap.add_argument('--n-support', type=int, default=3,
+                    help='Support samples per class per episode.')
+    ap.add_argument('--n-query', type=int, default=3,
+                    help='Query samples per class per episode.')
     ns = ap.parse_args()
 
     random.seed(ns.seed)
@@ -142,55 +153,85 @@ def main():
     light_preprocessor = LightROIPreprocessor(target_size=ns.image_size)
     print('LightROIPreprocessor active for prototype training (black reference)')
 
+    n_way     = min(ns.n_way, len(class_names))
+    n_support = ns.n_support
+    n_query   = ns.n_query
+    # Per-episode GPU tensors:
+    #   support: n_way * n_support * 2 swaps  =  n_way * n_support * 2
+    #   query:   n_way * n_query   * 2 swaps  =  n_way * n_query   * 2
+    # At n_way=3, n_support=3, n_query=3, image_size=224:
+    #   (3*3*2 + 3*3*2) = 36 tensors × [9,224,224] float32 ≈ 123 MB raw
+    #   (vs original: 150 tensors × [9,288,288] ≈ 430 MB raw)
+    # Enable mixed precision to halve that further.
+    use_amp = torch.cuda.is_available()
+    scaler  = torch.amp.GradScaler('cuda', enabled=use_amp)
+
     total_epochs = max(1, ns.episodes // ns.episodes_per_epoch)
     history = []
     centroids = None
     for epoch in range(total_epochs):
         model.train()
         epoch_loss = 0.0
-        pbar = tqdm(range(ns.episodes_per_epoch), desc=f'[prototype-episodic] epoch {epoch+1}/{total_epochs}')
+        pbar = tqdm(range(ns.episodes_per_epoch),
+                    desc=f'[prototype-episodic] epoch {epoch+1}/{total_epochs}')
         for step in pbar:
             global_episode_idx = epoch * ns.episodes_per_epoch + step
-            classes = choose_episode_classes(by_class, class_names, centroids, global_episode_idx, n_way=min(5, len(class_names)))
+            classes = choose_episode_classes(by_class, class_names, centroids,
+                                             global_episode_idx, n_way=n_way)
             class_to_idx = {c: i for i, c in enumerate(classes)}
             support, query, qys = [], [], []
             for cls in classes:
-                items = random.choices(by_class[cls], k=10)
-                support_samples = items[:5]
-                query_samples = items[5:10]
+                items = random.choices(by_class[cls], k=n_support + n_query)
+                support_samples = items[:n_support]
+                query_samples   = items[n_support:]
                 for s in support_samples:
-                    support.append(_embed_pair(s, augment, ns.image_size, swap=False))
-                    support.append(_embed_pair(s, augment, ns.image_size, swap=True))
+                    support.append(_embed_pair(s, augment, ns.image_size, swap=False,
+                                               light_preprocessor=light_preprocessor))
+                    support.append(_embed_pair(s, augment, ns.image_size, swap=True,
+                                               light_preprocessor=light_preprocessor))
                 for s in query_samples:
-                    query.append(_embed_pair(s, augment, ns.image_size, swap=False))
-                    query.append(_embed_pair(s, augment, ns.image_size, swap=True))
+                    query.append(_embed_pair(s, augment, ns.image_size, swap=False,
+                                             light_preprocessor=light_preprocessor))
+                    query.append(_embed_pair(s, augment, ns.image_size, swap=True,
+                                             light_preprocessor=light_preprocessor))
                     qys.extend([class_to_idx[cls], class_to_idx[cls]])
+
             sx = torch.stack(support).to(device)
             qx = torch.stack(query).to(device)
             qy = torch.tensor(qys, dtype=torch.long, device=device)
-            _, semb = model(sx)
-            _, qemb = model(qx)
-            support_proto = []
-            offset = 0
-            for _ in classes:
-                proto = semb[offset:offset + 10].mean(dim=0)
-                proto = F.normalize(proto, dim=0)
-                support_proto.append(proto)
-                offset += 10
-            protos = torch.stack(support_proto, dim=0)
-            dists = torch.cdist(F.normalize(qemb, dim=-1), protos)
-            loss = F.cross_entropy(-dists, qy)
+
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
+            with torch.amp.autocast('cuda', enabled=use_amp):
+                _, semb = model(sx)
+                _, qemb = model(qx)
+                support_proto = []
+                offset = 0
+                per_cls = n_support * 2   # both swaps
+                for _ in classes:
+                    proto = semb[offset:offset + per_cls].mean(dim=0)
+                    proto = F.normalize(proto, dim=0)
+                    support_proto.append(proto)
+                    offset += per_cls
+                protos = torch.stack(support_proto, dim=0)
+                dists  = torch.cdist(F.normalize(qemb, dim=-1), protos)
+                loss   = F.cross_entropy(-dists, qy)
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
             epoch_loss += float(loss.item())
             pbar.set_postfix(loss=f'{epoch_loss / max(1, pbar.n):.4f}')
+
         history.append({'epoch': epoch + 1, 'loss': epoch_loss / ns.episodes_per_epoch})
         if (epoch + 1) % max(1, 1000 // ns.episodes_per_epoch) == 0:
-            centroids = precompute_centroids(model, samples, class_names, device, ns.image_size)
+            centroids = precompute_centroids(model, samples, class_names, device,
+                                             ns.image_size,
+                                             light_preprocessor=light_preprocessor)
 
     torch.save({'model_state': model.state_dict(), 'class_names': class_names, 'args': vars(ns), 'history': history}, outdir / 'prototype_best.ckpt')
-    library = build_library(model, samples, class_names, device, ns.image_size)
+    library = build_library(model, samples, class_names, device, ns.image_size,
+                            light_preprocessor=light_preprocessor)
     (outdir / 'prototype_library.json').write_text(json.dumps(library, ensure_ascii=False, indent=2), encoding='utf-8')
     (outdir / 'labels.json').write_text(json.dumps(class_names, ensure_ascii=False, indent=2), encoding='utf-8')
     (outdir / 'metrics.json').write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding='utf-8')
